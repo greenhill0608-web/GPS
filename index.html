@@ -252,6 +252,11 @@
   .sheet-nav-btn + .sheet-dm-btn{margin-top:10px;}
 
   .start-sheet-sub{font-size:.84rem; color:var(--muted); margin:2px 0 14px;}
+  .start-sheet-msg{
+    display:none; font-size:.82rem; color:var(--entrance); background:rgba(166,72,46,.08);
+    border:1px solid rgba(166,72,46,.25); border-radius:10px; padding:9px 12px; margin:-4px 0 14px;
+  }
+  .start-sheet-msg.show{display:block;}
   .start-option-list{display:flex; flex-direction:column; max-height:52vh; overflow-y:auto;}
   .start-option{
     display:flex; align-items:center; gap:10px; padding:11px 4px;
@@ -336,6 +341,7 @@
   <div class="sheet-body">
     <h3>您現在在哪裡？</h3>
     <p class="start-sheet-sub">選好起點，馬上規劃前往「<span id="startSheetDest"></span>」的路線</p>
+    <p class="start-sheet-msg" id="startSheetMsg"></p>
     <div id="startOptionList" class="start-option-list"></div>
   </div>
 </div>
@@ -550,7 +556,7 @@
   ];
   var poiMap = {}; pois.forEach(function(p){poiMap[p.id]=p;});
 
-  var METERS_PER_PX = 0.345799; // 由「入口」與「綠丘行旅」兩個 GPS 校正點換算出的實際比例尺
+  var METERS_PER_PX = 0.353976; // 由三個 GPS 校正點以最小平方法換算出的實際比例尺
   var WALK_MPS = 0.8; // 悠閒散步（含拍照停留）估算速度，比一般步行速度慢一些
 
   // ---------- render ----------
@@ -761,12 +767,14 @@
     openDetail(id);
   }
 
-  // ---------- GPS 定位（用兩個已知地標校正） ----------
-  // 校正點：綠丘行旅 (24.446941,120.743331)->(492,277)、園區入口 (24.448521,120.742996)->(31,512)
-  // 由這兩點解出「經緯度 -> 地圖像素」的相似轉換（含縮放與旋轉，因為插畫地圖並非正北朝上）。
-  var GEO_A = {re:-83133.83487614483, im:-309398.62954602373};
-  var GEO_B = {re:17602198.183742195, im:35325730.18190107};
-  var GEO_SCALE_M_PER_PX = 0.345799; // 由兩校正點的實際距離換算得出，比先前用面積概估的比例更準
+  // ---------- GPS 定位（用三個已知地標做最小平方法校正） ----------
+  // 校正點：綠丘行旅 (24.446941,120.743331)->(492,277)、園區入口 (24.448521,120.742996)->(31,512)、
+  // 民宿內實測座標 (24.446888,120.743408)->(492,277，同綠丘行旅落點)。
+  // 由這三點以最小平方法解出「經緯度 -> 地圖像素」的相似轉換（含縮放與旋轉，因為插畫地圖並非正北朝上），
+  // 比原本只用兩點的版本更穩定。
+  var GEO_A = {re:-75303.14812344243, im:-303777.04490610544};
+  var GEO_B = {re:16519258.912963198, im:34838411.54321677};
+  var GEO_SCALE_M_PER_PX = 0.353976; // 由校正點的實際距離換算得出
   function llToPixel(lon, lat){
     // P = lon - i*lat ; Q = A*P + B  （複數乘法）
     var pre = lon, pim = -lat;
@@ -802,6 +810,17 @@
     youAreHere = g;
     return g;
   }
+  var miniYouAreHere = null;
+  function ensureMiniYouAreHere(){
+    if(miniYouAreHere) return miniYouAreHere;
+    var g = el('g',{class:'you-are-here'});
+    g.appendChild(el('circle',{class:'halo', cx:0, cy:0, r:70}));
+    g.appendChild(el('circle',{class:'pulse', cx:0, cy:0, r:16}));
+    g.appendChild(el('circle',{class:'dot', cx:0, cy:0, r:16}));
+    miniSvg.appendChild(g);
+    miniYouAreHere = g;
+    return g;
+  }
 
   function startWatch(){
     locateStatus.textContent = '定位中…';
@@ -811,11 +830,17 @@
       var xy = llToPixel(lon, lat);
       myLocationPixel = xy;
       updateMyLocationOption();
+      var haloR = Math.max(24, Math.min(160, acc / GEO_SCALE_M_PER_PX));
+      // 主地圖藍點
       var g = ensureYouAreHere();
       var circles = g.querySelectorAll('circle');
       circles.forEach(function(c){ c.setAttribute('cx', xy[0]); c.setAttribute('cy', xy[1]); });
-      var haloR = Math.max(24, Math.min(160, acc / GEO_SCALE_M_PER_PX));
       circles[0].setAttribute('r', haloR);
+      // 路線彈窗裡的縮圖地圖也同步顯示藍點，並隨定位即時移動
+      var mg = ensureMiniYouAreHere();
+      var miniCircles = mg.querySelectorAll('circle');
+      miniCircles.forEach(function(c){ c.setAttribute('cx', xy[0]); c.setAttribute('cy', xy[1]); });
+      miniCircles[0].setAttribute('r', haloR);
       locateBtn.textContent = '📍 停止定位';
       var outOfBounds = xy[0]<-100 || xy[1]<-100 || xy[0]>1636 || xy[1]>1124;
       locateStatus.textContent = outOfBounds
@@ -827,12 +852,19 @@
         planRoute('myloc', destId);
       }
     }, function(err){
-      locateStatus.textContent = err.code===1 ? permissionGuidance() : '目前無法取得定位，請稍後再試一次。';
+      var msg = err.code===1 ? permissionGuidance() : '目前無法取得定位，請稍後再試一次。';
+      locateStatus.textContent = msg;
       watchId = null;
       myLocationPixel = null;
+      var hadPendingNav = !!pendingNavDestId;
       pendingNavDestId = null;
       updateMyLocationOption();
       locateBtn.textContent = '📍 定位我的位置';
+      if(hadPendingNav && activeSheetEl === startSheet){
+        if(startGpsRenderFn) startGpsRenderFn();
+        startSheetMsg.textContent = '定位失敗（'+msg+'）請直接從下方挑選您現在最靠近的地點當起點。';
+        startSheetMsg.classList.add('show');
+      }
     }, {enableHighAccuracy:true, maximumAge:5000, timeout:15000});
   }
 
@@ -866,6 +898,7 @@
       pendingNavDestId = null;
       updateMyLocationOption();
       if(youAreHere){ youAreHere.remove(); youAreHere=null; }
+      if(miniYouAreHere){ miniYouAreHere.remove(); miniYouAreHere=null; }
       locateBtn.textContent = '📍 定位我的位置';
       locateStatus.textContent = '';
       return;
@@ -918,12 +951,16 @@
   // ---------- 起點選擇彈窗（由「導航到這裡」開啟） ----------
   var startSheet = document.getElementById('startSheet');
   var startSheetDest = document.getElementById('startSheetDest');
+  var startSheetMsg = document.getElementById('startSheetMsg');
   var startOptionList = document.getElementById('startOptionList');
   var startSheetDestId = null;
+  var startGpsRenderFn = null; // 供定位成功/失敗的callback更新選項文字用
 
   function openStartSheet(destId){
     startSheetDestId = destId;
     startSheetDest.textContent = poiMap[destId].name;
+    startSheetMsg.classList.remove('show');
+    startSheetMsg.textContent = '';
     startOptionList.innerHTML = '';
 
     var gpsBtn = document.createElement('button');
@@ -938,6 +975,7 @@
         '<span class="opt-sub">'+sub+'</span></span>';
     }
     renderGpsOption();
+    startGpsRenderFn = renderGpsOption;
     gpsBtn.addEventListener('click', function(){
       if(myLocationPixel){
         closeActiveSheet();
@@ -945,6 +983,7 @@
         return;
       }
       // 尚未定位：讓系統開始嘗試定位，定位成功後會自動用這個地點規劃路線
+      startSheetMsg.classList.remove('show');
       pendingNavDestId = destId;
       renderGpsOption();
       requestLocation();
